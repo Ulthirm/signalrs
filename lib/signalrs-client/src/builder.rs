@@ -149,12 +149,25 @@ impl ClientBuilder {
         self
     }
 
+    /// Specifies custom headers to attach to the WebSocket request.
+    ///
+    /// Headers should be provided as a HashMap where the key is the header name
+    /// and the value is the header value.
+    pub fn use_headers(mut self, headers: HashMap<String, String>) -> Self {
+        for (key, value) in headers.iter() {
+            event!(Level::DEBUG, "Added custom header: {}: {}", key, value);
+        }
+        self.custom_headers = Some(headers);
+        self
+    }
+
     /// Builds an actual clients
     ///
     /// Performs protocol negotiation and server handshake.
     pub async fn build(self) -> Result<SignalRClient, BuilderError> {
+        event!(Level::DEBUG, "building client");
         let negotiate_response = self.get_server_supported_features().await?;
-
+        event!(Level::DEBUG, "Negotiate response: {:?}", negotiate_response);
         if !can_connect(negotiate_response) {
             return Err(BuilderError::Negotiate {
                 source: NegotiateError::Unsupported,
@@ -166,6 +179,8 @@ impl ClientBuilder {
         let (tx, rx) = flume::bounded::<ClientMessage>(1);
 
         let (transport_handle, client) = crate::new_client(tx, self.hub);
+
+        event!(Level::DEBUG, "idk tbh builder");
 
         transport::websocket::handshake(&mut ws_handle)
             .await
@@ -198,6 +213,9 @@ impl ClientBuilder {
         if let Some(headers) = &self.custom_headers {
             for (key, value) in headers {
                 request_builder = request_builder.header(key, value);
+                //log::debug!("Added custom header: {}: {}", key, value);
+                println!("Added custom header: {}: {}", key, value);
+                event!(Level::DEBUG, "Added custom header: {}: {}", key, value);
             }
         }
      
@@ -235,18 +253,33 @@ impl ClientBuilder {
             self.get_domain_with_path(),
             self.get_query_string()
         );
-
+        event!(Level::DEBUG, "negotiate endpoint: {}", negotiate_endpoint);
         let mut request = reqwest::Client::new().post(negotiate_endpoint);
 
+        // Add the custom header if it is required
+        if let Some(headers) = &self.custom_headers {
+            for (key, value) in headers {
+                request = request.header(key, value);
+            }
+        }
+
+        // Apply the standard authentication
         request = match &self.auth {
             Auth::None => request,
             Auth::Basic { user, password } => request.basic_auth(user, password.clone()),
             Auth::Bearer { token } => request.bearer_auth(token),
         };
 
+
+        event!(Level::DEBUG, "request: {:?}", request);
+
         let http_response = request.send().await?.error_for_status()?;
 
+        event!(Level::DEBUG, "HTTP Response: {:?}", http_response);
+
         let response: NegotiateResponseV0 = serde_json::from_str(&http_response.text().await?)?;
+
+        event!(Level::DEBUG, "HTTP Response: {:?}", response);
 
         Ok(response)
     }
