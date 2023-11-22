@@ -8,6 +8,9 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::*;
+use std::collections::HashMap;
+use http::{Request, HeaderMap};
+use tokio_tungstenite::tungstenite::http::{Request as WebSocketRequest, Method as WebSocketMethod};
 
 /// [`SignalRClient`] builder.
 ///
@@ -36,6 +39,7 @@ pub struct ClientBuilder {
     port: Option<usize>,
     query_string: Option<String>,
     hub_path: Option<String>,
+    custom_headers: Option<HashMap<String, String>>,
 }
 
 /// Authentication for negotiate and further network connection
@@ -94,6 +98,7 @@ impl ClientBuilder {
             port: None,
             query_string: None,
             hub_path: None,
+            custom_headers: None,
         }
     }
 
@@ -181,17 +186,47 @@ impl ClientBuilder {
         let scheme = self.get_ws_scheme();
         let domain_and_path = self.get_domain_with_path();
         let query = self.get_query_string();
-
+    
         let url = format!("{}://{}?{}", scheme, domain_and_path, query);
+    
+        // Start building the WebSocket request
+        let mut request_builder = WebSocketRequest::builder()
+            .uri(url)
+            .method(WebSocketMethod::GET);  // Use the correct Method type here
+    
+        // Add the custom headers if they exist
+        if let Some(headers) = &self.custom_headers {
+            for (key, value) in headers {
+                request_builder = request_builder.header(key, value);
+            }
+        }
+     
+        // Build the request
+        let request = request_builder
+            .body(())
+            .map_err(|error| {
+                let io_error = std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("HTTP error: {}", error)
+                );
+        BuilderError::Transport {
+            source: TransportError::Websocket { 
+                source: tokio_tungstenite::tungstenite::Error::Io(io_error)
+            },
+        }
+        })?;
 
-        let (ws_handle, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .map_err(|error| BuilderError::Transport {
-                source: TransportError::Websocket { source: error },
-            })?;
+    // Connect using the request
+    let (ws_handle, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|error| BuilderError::Transport {
+        source: TransportError::Websocket { source: error },
+        })?;
 
-        Ok(ws_handle)
-    }
+    Ok(ws_handle)
+
+}
+    
 
     async fn get_server_supported_features(&self) -> Result<NegotiateResponseV0, NegotiateError> {
         let negotiate_endpoint = format!(
@@ -247,6 +282,11 @@ impl ClientBuilder {
             (Some(path), None) => format!("{}/{}", self.domain, path),
             (Some(path), Some(port)) => format!("{}:{}/{}", self.domain, port, path),
         }
+    }
+
+    pub fn add_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.custom_headers.get_or_insert_with(HashMap::new).insert(key.into(), value.into());
+        self
     }
 }
 
